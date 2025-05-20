@@ -71,5 +71,38 @@ modeling_llama.py
 ## Run experiment
 
 ```bash
+conda activate BTP
+```
+
+### MME Result
+```bash
 CUDA_VISIBLE_DEVICES=0 accelerate launch --num_processes=1 -m lmms_eval --model llava   --model_args pretrained="llava-v1.5-7b"   --tasks mme  --batch_size 1 --log_samples --log_samples_suffix BTP --output_path ./logs/
 ```
+
+### MMB Result
+
+```bash
+CUDA_VISIBLE_DEVICES=0 accelerate launch --num_processes=1 -m lmms_eval --model llava   --model_args pretrained="llava-v1.5-7b"   --tasks mmbench_en  --batch_size 1 --log_samples --log_samples_suffix BTP --output_path ./logs/
+```
+
+### POPE Result
+
+```bash
+CUDA_VISIBLE_DEVICES=0 accelerate launch --num_processes=1 -m lmms_eval --model llava   --model_args pretrained="llava-v1.5-7b"   --tasks pope  --batch_size 1 --log_samples --log_samples_suffix BTP --output_path ./logs/
+```
+
+### GQA Result
+
+```bash
+CUDA_VISIBLE_DEVICES=0 accelerate launch --num_processes=1 -m lmms_eval --model llava   --model_args pretrained="llava-v1.5-7b"   --tasks gqa  --batch_size 1 --log_samples --log_samples_suffix BTP --output_path ./logs/
+```
+
+### SQA Result
+
+```bash
+CUDA_VISIBLE_DEVICES=0 accelerate launch --num_processes=1 -m lmms_eval --model llava   --model_args pretrained="llava-v1.5-7b"   --tasks sqa  --batch_size 1 --log_samples --log_samples_suffix BTP --output_path ./logs/
+```
+
+## Results on other LVLMs
+
+Our code will be released after acceptance.
