@@ -1,6 +1,29 @@
-# Balanced-Token-Pruning
+# Balanced Token Pruning: Accelerating Vision Language Models Beyond Local Optimization (Neurips 2025)
 
-## Install
+## 📺 News. 
+
+**[2025.9.25]** 🚀 We release the Qwen-2.5-VL version code!
+
+**[2025.9.18]** 🎉 Our paper has been accepted by Neurips 2025!!!
+
+**[2025.7.25]** 🚀 We release the LLaVA version code!
+
+**[2025.5.28]** 🚀 We release the paper at [ArXiv](https://arxiv.org/abs/2505.22038)!
+
+## 💡 Highlights
+- 🔥 **Pruning layer determination**: We determine the pruning layers using a calibration set. No answers are required — we only utilize the image processing procedure.
+- 🔥 **Cross-layer pruning analysis**: we analyze how shallow-layer pruning affects deeper layers and propose our balanced token pruning method.
+- 🔥 **Support FlashAttention**:
+Our codebase support flash_attention_2.
+
+
+## 👨‍💻 Todo
+
+- [ ] Release the code of llava-next
+- [ ] Release all the baseline codes.
+- [ ] Further simplify the code to Qwen and series.
+
+## ⚙️ Install
 
 ### Initialize Enviroment
 ```bash
@@ -15,12 +38,10 @@ pip install -e .
 pip install transformer==4.40.0
 pip install torch==2.3.0
 ```
-### Install Flash-attn
-1. download wheel file from https://github.com/Dao-AILab/flash-attention/releases/**flash_attn-2.7.4.post1+cu12torch2.3cxx11abiFALSE-cp310-cp310-linux_x86_64.whl**
-
-2. install the wheel
+### Install Flash-attn  
+download wheel file from https://github.com/Dao-AILab/flash-attention/releases/**flash_attn-2.7.4.post1+cu12torch2.3cxx11abiFALSE-cp310-cp310-linux_x86_64.whl**  
 ```bash
- pip install xx.wheel
+pip install xx.wheel
 ```
 
 ### Install lmms-eval
@@ -57,9 +78,11 @@ pip install datasets==3.2.0
 
 > ⚠️ **Note:** If the above installation steps report environment dependency issues, you can safely ignore the errors.
 
-## Replace with BTP Implementation
 
-**Replace the original llama implementation with BTP implementation**
+
+## 🚄 Quick Start
+
+### LLaVA Results
 
 **Replace:**
 
@@ -68,41 +91,51 @@ pip install datasets==3.2.0
 **With Given:**
 modeling_llama.py
 
-## Run experiment
+#### Run experiment
 
 ```bash
 conda activate BTP
 ```
 
-### MME Result
+#### MME Result
 ```bash
 CUDA_VISIBLE_DEVICES=0 accelerate launch --num_processes=1 -m lmms_eval --model llava   --model_args pretrained="llava-v1.5-7b"   --tasks mme  --batch_size 1 --log_samples --log_samples_suffix BTP --output_path ./logs/
 ```
 
-### MMB Result
+#### MMB Result
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 accelerate launch --num_processes=1 -m lmms_eval --model llava   --model_args pretrained="llava-v1.5-7b"   --tasks mmbench_en  --batch_size 1 --log_samples --log_samples_suffix BTP --output_path ./logs/
 ```
 
-### POPE Result
+#### POPE Result
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 accelerate launch --num_processes=1 -m lmms_eval --model llava   --model_args pretrained="llava-v1.5-7b"   --tasks pope  --batch_size 1 --log_samples --log_samples_suffix BTP --output_path ./logs/
 ```
 
-### GQA Result
+#### GQA Result
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 accelerate launch --num_processes=1 -m lmms_eval --model llava   --model_args pretrained="llava-v1.5-7b"   --tasks gqa  --batch_size 1 --log_samples --log_samples_suffix BTP --output_path ./logs/
 ```
 
-### SQA Result
+#### SQA Result
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 accelerate launch --num_processes=1 -m lmms_eval --model llava   --model_args pretrained="llava-v1.5-7b"   --tasks sqa  --batch_size 1 --log_samples --log_samples_suffix BTP --output_path ./logs/
 ```
 
-## Results on other LVLMs
 
-Our code will be released after acceptance.
+
+
+## 🎉 Acknowledgments
+
+- [LLaVA](https://github.com/haotian-liu/LLaVA): the codebase we built upon. Thanks for their brilliant contributions to the community.
+- [Open-LLaVA-NeXT](https://github.com/xiaoachen98/Open-LLaVA-NeXT): Thanks for the impressive open-source implementation of LLaVA-NeXT series.
+- [Qwen-2.5-VL](https://github.com/QwenLM/Qwen3-VL): Thanks for the impressive open-source implementation of Qwen-2.5-VL series.
+- [lmms-eval](https://github.com/EvolvingLMMs-Lab/lmms-eval): the amazing open-sourced codebase for evaluating various LVLMs!
+- [FastV](https://github.com/pkunlp-icler/FastV): the excellent pruning methods based on attention.
+- [PyramidDrop](https://github.com/Cooperx521/PyramidDrop): The excellent pruning method introduces a layer-wise pruning strategy.
+- [Divprune](https://github.com/vbdi/divprune): the excellent pruning methods based on diversity.
+
