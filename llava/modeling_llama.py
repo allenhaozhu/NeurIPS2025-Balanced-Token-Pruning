@@ -944,12 +944,28 @@ class LlamaModel(LlamaPreTrainedModel):
         self.post_init()
         # Pruning Settings
         self.use_flash_pruning = True
+        # Pruning method: 'btp', 'rpd', 'cam', 'lli', 'hfp'
+        self.pruning_method = getattr(config, 'pruning_method', 'btp')
         # Pruning Layers
         self.start_layer = 4
-        self.img_sense_layer = 7 
+        self.img_sense_layer = 7
         self.rel_start_layer = 15
         self.end_layer = 22
         self.initial_div_indices = self.get_div_initial_indices(24,24,144)
+
+        # Initialize new pruning methods
+        if self.pruning_method != 'btp':
+            from .pruning_methods import create_pruner
+            if self.pruning_method == 'rpd':
+                self.pruner = create_pruner('rpd', d_model=config.hidden_size, d_proj=128)
+            elif self.pruning_method == 'cam':
+                self.pruner = create_pruner('cam')
+            elif self.pruning_method == 'hfp':
+                self.pruner = create_pruner('hfp', d_model=config.hidden_size, use_learned=False)
+            else:
+                raise ValueError(f"Unknown pruning method: {self.pruning_method}")
+        else:
+            self.pruner = None
         
     def get_div_initial_indices(self,H,W,k):
         N = H * W  # 576
@@ -1021,6 +1037,92 @@ class LlamaModel(LlamaPreTrainedModel):
             pre_indices = pre_indices[:select_num]
             attn_indices = pre_indices
         return attn_indices
+
+    def prune_with_new_method(self, hidden_states, layer_idx, k, prelayer_attention):
+        """
+        Pruning using new methods (RPD, CAM, HFP)
+
+        Args:
+            hidden_states: Current hidden states
+            layer_idx: Current layer index
+            k: Number of tokens to keep
+            prelayer_attention: Attention weights from previous layer
+
+        Returns:
+            indices: Selected token indices
+        """
+        if self.pruning_method == 'rpd':
+            # Random Projection Diversity
+            if not hasattr(self.pruner, 'proj_initialized') or not self.pruner.proj_initialized:
+                self.pruner.to(hidden_states.device)
+
+            pre_hidden_state = hidden_states.clone().squeeze(0)
+            img_hidden_state = pre_hidden_state[35:611]
+
+            # For first layer, use spatial prior
+            if layer_idx == self.start_layer:
+                # Combine with spatial prior like BTP
+                div_select_num = int(k * 0.3)
+                div_indices = self.pruner.compute_diversity(img_hidden_state, div_select_num, None)
+
+                # Use attention for the rest
+                if prelayer_attention is not None:
+                    attn_select_num = int(k * 0.7)
+                    last_token_attn = prelayer_attention[:,:,-1,:]
+                    image_attention = last_token_attn[:,:,35:611]
+                    extra_num = int(attn_select_num * 1.5)
+                    attn_indices = self.attn_prune(image_attention, attn_select_num, extra_num, k)
+                    attn_indices = attn_indices.squeeze().tolist()
+
+                    # Combine
+                    combined_indices = list(set(attn_indices) | set(div_indices.tolist()))
+                    now_num = len(combined_indices)
+                    left_num = k - now_num
+                    if left_num > 0:
+                        indices = self.pruner.compute_diversity(img_hidden_state, left_num, combined_indices)
+                    else:
+                        indices = torch.tensor(combined_indices)
+                else:
+                    indices = div_indices
+            else:
+                # Pure diversity for other layers
+                indices = self.pruner.compute_diversity(img_hidden_state, k, None)
+
+        elif self.pruning_method == 'cam':
+            # Cross-Attention Mining
+            if prelayer_attention is not None:
+                importance = self.pruner.compute_importance(prelayer_attention, 35, 611)
+                if importance is not None:
+                    indices = torch.topk(importance, k).indices
+                else:
+                    # Fallback to diversity
+                    pre_hidden_state = hidden_states.clone().squeeze(0)
+                    img_hidden_state = pre_hidden_state[35:611]
+                    indices = self.div_prune(img_hidden_state, k, None)
+            else:
+                # Fallback to diversity
+                pre_hidden_state = hidden_states.clone().squeeze(0)
+                img_hidden_state = pre_hidden_state[35:611]
+                indices = self.div_prune(img_hidden_state, k, None)
+
+        elif self.pruning_method == 'hfp':
+            # Hybrid Fast Pruning
+            if not hasattr(self.pruner.rpd, 'proj_initialized') or not self.pruner.rpd.proj_initialized:
+                self.pruner.to(hidden_states.device)
+
+            pre_hidden_state = hidden_states.clone().squeeze(0)
+            indices = self.pruner.prune(
+                pre_hidden_state,
+                layer_idx,
+                k,
+                attention_weights=prelayer_attention,
+                image_start=35,
+                image_end=611
+            )
+        else:
+            raise ValueError(f"Unknown pruning method: {self.pruning_method}")
+
+        return indices
         
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -1100,31 +1202,38 @@ class LlamaModel(LlamaPreTrainedModel):
                         total_length = hidden_states.shape[1]
                         k = 576 // 2
                         self.hidden_length = k
-                        # select based on diversity
-                        div_select_num = int(k*0.3)
-                        pre_hidden_state = hidden_states.clone().squeeze(0)
-                        img_hidden_state = pre_hidden_state[35:611]
-                        div_indices = self.div_prune(img_hidden_state,div_select_num,None)
-                        # select based on attention
-                        attn_select_num = int(k*0.3)
-                        last_token_attn = prelayer_attention[:,:,-1,:]
-                        image_attention = last_token_attn[:,:,35:611]
-                        extra_num = int(attn_select_num*3.7)
-                        attn_indices = self.attn_prune(image_attention,attn_select_num,extra_num,k)
-                        attn_indices = attn_indices.squeeze().tolist()
-                        # Initialize with spa
-                        attn_indices = list(set(attn_indices) | set(self.initial_div_indices.clone().tolist()) | set(div_indices.tolist()))
-                        # if left use div
-                        now_num = len(attn_indices)
-                        left_num = k-now_num
-                        # print("first left_num",left_num)
-                        if left_num > 0:
-                            indices = self.div_prune(img_hidden_state,left_num,attn_indices)
+
+                        # Use new pruning method or BTP
+                        if self.pruning_method != 'btp':
+                            indices = self.prune_with_new_method(hidden_states, layer_index, k, prelayer_attention)
                         else:
-                            if left_num < 0:
-                                # print(left_num)
-                                print("Bug!")
-                            indices = torch.tensor(attn_indices)
+                            # Original BTP method
+                            # select based on diversity
+                            div_select_num = int(k*0.3)
+                            pre_hidden_state = hidden_states.clone().squeeze(0)
+                            img_hidden_state = pre_hidden_state[35:611]
+                            div_indices = self.div_prune(img_hidden_state,div_select_num,None)
+                            # select based on attention
+                            attn_select_num = int(k*0.3)
+                            last_token_attn = prelayer_attention[:,:,-1,:]
+                            image_attention = last_token_attn[:,:,35:611]
+                            extra_num = int(attn_select_num*3.7)
+                            attn_indices = self.attn_prune(image_attention,attn_select_num,extra_num,k)
+                            attn_indices = attn_indices.squeeze().tolist()
+                            # Initialize with spa
+                            attn_indices = list(set(attn_indices) | set(self.initial_div_indices.clone().tolist()) | set(div_indices.tolist()))
+                            # if left use div
+                            now_num = len(attn_indices)
+                            left_num = k-now_num
+                            # print("first left_num",left_num)
+                            if left_num > 0:
+                                indices = self.div_prune(img_hidden_state,left_num,attn_indices)
+                            else:
+                                if left_num < 0:
+                                    # print(left_num)
+                                    print("Bug!")
+                                indices = torch.tensor(attn_indices)
+
                         indices = indices.squeeze().cpu()
                         indices, _ = torch.sort(indices)
                         remain_img_index = indices + 35
@@ -1138,30 +1247,47 @@ class LlamaModel(LlamaPreTrainedModel):
                         total_length = hidden_states.shape[1]
                         k = self.hidden_length // 2
                         img_end = 35 + self.hidden_length
-                        # diversity selection
-                        div_select_num = int(k*0.1)
-                        pre_hidden_state =  hidden_states.clone().squeeze(0)
-                        img_hidden_state = pre_hidden_state[35:img_end]
-                        div_indices = self.div_prune(img_hidden_state,div_select_num,None)
-                        # attn selection
-                        attn_select_num = int(k*0.9)
-                        last_token_attn = prelayer_attention[:,:,-1,:]
-                        image_attention = last_token_attn[:,:,35:img_end]
-                        extra_num = int(attn_select_num * 1.5)
-                        attn_indices = self.attn_prune(image_attention,attn_select_num,extra_num,k)
-                        # if left use div
-                        attn_indices = attn_indices.squeeze().tolist()
-                        attn_indices = list(set(attn_indices) | set(div_indices))
-                        now_num = len(attn_indices)
-                        left_num = k - now_num
-                        # print("left_num",left_num)
-                        if left_num > 0:
-                            indices = self.div_prune(img_hidden_state,left_num,attn_indices)
+
+                        # Use new pruning method or BTP
+                        if self.pruning_method != 'btp':
+                            # Adjust image_end for new methods
+                            pre_hidden_state = hidden_states.clone().squeeze(0)
+                            img_hidden_state = pre_hidden_state[35:img_end]
+
+                            # Create a temporary hidden state with correct shape
+                            temp_hidden = torch.cat([
+                                pre_hidden_state[:35],
+                                img_hidden_state,
+                                pre_hidden_state[img_end:]
+                            ], dim=0).unsqueeze(0)
+
+                            indices = self.prune_with_new_method(temp_hidden, layer_index, k, prelayer_attention)
                         else:
-                            if left_num < 0:
-                                print("Bug!")
-                            indices = torch.tensor(attn_indices)
-                        
+                            # Original BTP method
+                            # diversity selection
+                            div_select_num = int(k*0.1)
+                            pre_hidden_state =  hidden_states.clone().squeeze(0)
+                            img_hidden_state = pre_hidden_state[35:img_end]
+                            div_indices = self.div_prune(img_hidden_state,div_select_num,None)
+                            # attn selection
+                            attn_select_num = int(k*0.9)
+                            last_token_attn = prelayer_attention[:,:,-1,:]
+                            image_attention = last_token_attn[:,:,35:img_end]
+                            extra_num = int(attn_select_num * 1.5)
+                            attn_indices = self.attn_prune(image_attention,attn_select_num,extra_num,k)
+                            # if left use div
+                            attn_indices = attn_indices.squeeze().tolist()
+                            attn_indices = list(set(attn_indices) | set(div_indices))
+                            now_num = len(attn_indices)
+                            left_num = k - now_num
+                            # print("left_num",left_num)
+                            if left_num > 0:
+                                indices = self.div_prune(img_hidden_state,left_num,attn_indices)
+                            else:
+                                if left_num < 0:
+                                    print("Bug!")
+                                indices = torch.tensor(attn_indices)
+
                         indices = indices.squeeze().cpu()
                         indices, _ = torch.sort(indices)
                         remain_img_index = indices + 35
@@ -1175,11 +1301,27 @@ class LlamaModel(LlamaPreTrainedModel):
                         total_length = hidden_states.shape[1]
                         k = (self.hidden_length) // 3
                         img_end = 35 + self.hidden_length
-                        last_token_attn = prelayer_attention[:,:,-1,:]
-                        image_attention = last_token_attn[:,:,35:img_end]
-                        extra_num = int(k * 1.2)
-                        indices = self.attn_prune(image_attention,k,extra_num,k)
-                        
+
+                        # Use new pruning method or BTP
+                        if self.pruning_method != 'btp':
+                            pre_hidden_state = hidden_states.clone().squeeze(0)
+                            img_hidden_state = pre_hidden_state[35:img_end]
+
+                            # Create a temporary hidden state with correct shape
+                            temp_hidden = torch.cat([
+                                pre_hidden_state[:35],
+                                img_hidden_state,
+                                pre_hidden_state[img_end:]
+                            ], dim=0).unsqueeze(0)
+
+                            indices = self.prune_with_new_method(temp_hidden, layer_index, k, prelayer_attention)
+                        else:
+                            # Original BTP method
+                            last_token_attn = prelayer_attention[:,:,-1,:]
+                            image_attention = last_token_attn[:,:,35:img_end]
+                            extra_num = int(k * 1.2)
+                            indices = self.attn_prune(image_attention,k,extra_num,k)
+
                         indices = indices.squeeze().cpu()
                         indices, _ = torch.sort(indices)
                         remain_img_index = indices + 35
