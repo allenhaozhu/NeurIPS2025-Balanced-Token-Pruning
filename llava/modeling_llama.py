@@ -962,6 +962,8 @@ class LlamaModel(LlamaPreTrainedModel):
                 self.pruner = create_pruner('cam')
             elif self.pruning_method == 'hfp':
                 self.pruner = create_pruner('hfp', d_model=config.hidden_size, use_learned=False)
+            elif self.pruning_method == 'sgp':
+                self.pruner = create_pruner('sgp', num_groups=4, grid_size=24, grouping='spatial')
             else:
                 raise ValueError(f"Unknown pruning method: {self.pruning_method}")
         else:
@@ -1114,6 +1116,16 @@ class LlamaModel(LlamaPreTrainedModel):
             indices = self.pruner.prune(
                 pre_hidden_state,
                 layer_idx,
+                k,
+                attention_weights=prelayer_attention,
+                image_start=35,
+                image_end=611
+            )
+
+        elif self.pruning_method == 'sgp':
+            # Spatial Grouped Pruning
+            indices = self.pruner.prune(
+                hidden_states,
                 k,
                 attention_weights=prelayer_attention,
                 image_start=35,

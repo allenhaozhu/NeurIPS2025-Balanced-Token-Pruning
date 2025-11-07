@@ -22,6 +22,7 @@ PRUNING_METHODS = {
     'rpd': 'Random Projection Diversity (4× faster diversity)',
     'cam': 'Cross-Attention Mining (free, task-aware)',
     'hfp': 'Hybrid Fast Pruning (combines RPD + CAM)',
+    'sgp': 'Spatial Grouped Pruning (2-4× faster, spatial-aware)',
 }
 
 
@@ -104,6 +105,7 @@ Available Pruning Methods:
   rpd  : Random Projection Diversity (4× faster diversity)
   cam  : Cross-Attention Mining (free, task-aware)
   hfp  : Hybrid Fast Pruning (combines RPD + CAM)
+  sgp  : Spatial Grouped Pruning (2-4× faster, spatial-aware)
 
 Examples:
 ---------

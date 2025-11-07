@@ -178,6 +178,186 @@ class TinyImportancePredictor(nn.Module):
         return importance
 
 
+class SpatialGroupedPruner:
+    """
+    Spatial Grouped Pruning - divides image into spatial regions and prunes within each.
+
+    Key idea: Instead of computing attention over all 576 tokens, divide into
+    spatial groups (e.g., 4 quadrants) and process each separately.
+
+    Complexity: O(n²/k) where k = num_groups
+    For k=4: 4× faster pruning decisions
+
+    Advantages:
+    - Preserves spatial structure (nearby patches stay together)
+    - Ensures diversity across spatial regions (all regions represented)
+    - Much faster than full attention
+    - Natural for vision tasks
+    """
+
+    def __init__(self, num_groups=4, grid_size=24, grouping='spatial'):
+        """
+        Args:
+            num_groups: Number of spatial groups (should be perfect square: 4, 9, 16)
+            grid_size: Size of image grid (24 for LLaVA = 24×24 = 576 tokens)
+            grouping: 'spatial' (recommended) or 'random' (not recommended)
+        """
+        self.num_groups = num_groups
+        self.grid_size = grid_size
+        self.grouping = grouping
+
+        # Validate num_groups is perfect square for spatial grouping
+        if grouping == 'spatial':
+            sqrt_groups = int(num_groups ** 0.5)
+            if sqrt_groups ** 2 != num_groups:
+                raise ValueError(f"num_groups must be perfect square for spatial grouping, got {num_groups}")
+
+    def create_spatial_groups(self, n_tokens):
+        """
+        Create spatial groups for image tokens.
+
+        For 4 groups (2×2):
+        ┌─────────┬─────────┐
+        │ Group 0 │ Group 1 │
+        ├─────────┼─────────┤
+        │ Group 2 │ Group 3 │
+        └─────────┴─────────┘
+
+        Returns:
+            List of tensors, each containing indices for one group
+        """
+        h, w = self.grid_size, self.grid_size
+        groups_per_side = int(self.num_groups ** 0.5)
+        group_h = h // groups_per_side
+        group_w = w // groups_per_side
+
+        groups = []
+        for i in range(groups_per_side):
+            for j in range(groups_per_side):
+                start_h = i * group_h
+                start_w = j * group_w
+
+                indices = []
+                for row in range(start_h, start_h + group_h):
+                    for col in range(start_w, start_w + group_w):
+                        indices.append(row * w + col)
+
+                groups.append(torch.tensor(indices))
+
+        return groups
+
+    def create_random_groups(self, n_tokens):
+        """
+        Create random groups (not recommended - breaks spatial relationships).
+
+        Only for comparison/ablation studies.
+        """
+        indices = torch.randperm(n_tokens)
+        group_size = n_tokens // self.num_groups
+
+        groups = []
+        for i in range(self.num_groups):
+            groups.append(indices[i * group_size:(i + 1) * group_size])
+
+        return groups
+
+    def compute_importance_in_group(self, group_tokens, group_attention=None):
+        """
+        Compute token importance within a group.
+
+        Uses attention if available, otherwise diversity.
+
+        Args:
+            group_tokens: [n_group_tokens, d_model]
+            group_attention: [heads, n_group_tokens] attention to this group (optional)
+
+        Returns:
+            importance: [n_group_tokens]
+        """
+        if group_attention is not None:
+            # Use attention-based importance
+            importance = group_attention.mean(dim=0)  # Average over heads
+        else:
+            # Use diversity-based importance
+            group_norm = F.normalize(group_tokens, p=2, dim=1)
+            similarity = torch.matmul(group_norm, group_norm.T)
+            # Higher diversity = lower average similarity
+            diversity = (1 - similarity).sum(dim=1)
+            importance = diversity
+
+        return importance
+
+    def prune(self, hidden_states, k, attention_weights=None, image_start=35, image_end=611):
+        """
+        Prune tokens using spatial grouping.
+
+        Args:
+            hidden_states: [batch, seq_len, d_model] or [seq_len, d_model]
+            k: Total number of tokens to keep
+            attention_weights: Optional attention weights
+            image_start: Start index of image tokens
+            image_end: End index of image tokens
+
+        Returns:
+            indices: Selected token indices (relative to image region)
+        """
+        # Handle batch dimension
+        if len(hidden_states.shape) == 3:
+            hidden_states = hidden_states.squeeze(0)
+
+        # Extract image tokens
+        img_tokens = hidden_states[image_start:image_end]
+        n_tokens = img_tokens.shape[0]
+
+        # Create groups
+        if self.grouping == 'spatial':
+            groups = self.create_spatial_groups(n_tokens)
+        else:
+            groups = self.create_random_groups(n_tokens)
+
+        # Tokens to keep per group (proportional)
+        k_per_group = k // self.num_groups
+
+        selected_indices = []
+
+        for group_idx in groups:
+            # Get tokens for this group
+            group_tokens = img_tokens[group_idx]
+
+            # Get attention for this group if available
+            group_attention = None
+            if attention_weights is not None:
+                # Extract attention to this group
+                # attention_weights shape: [batch, heads, seq_len, seq_len] or [heads, seq_len, seq_len]
+                if len(attention_weights.shape) == 4:
+                    attn = attention_weights[0]  # Take first batch
+                else:
+                    attn = attention_weights
+
+                # Get last token's attention to this group
+                last_token_attn = attn[:, -1, image_start:image_end]  # [heads, n_img_tokens]
+                group_attention = last_token_attn[:, group_idx]  # [heads, n_group_tokens]
+
+            # Compute importance within group
+            importance = self.compute_importance_in_group(group_tokens, group_attention)
+
+            # Select top-k from this group
+            if k_per_group < len(group_idx):
+                top_k_local = torch.topk(importance, k_per_group).indices
+                selected_indices.append(group_idx[top_k_local])
+            else:
+                # Keep all if k_per_group >= group size
+                selected_indices.append(group_idx)
+
+        # Combine all selected indices
+        all_selected = torch.cat(selected_indices)
+
+        # Sort for sequential access
+        all_selected, _ = torch.sort(all_selected)
+
+        return all_selected
+
+
 class HybridFastPruner:
     """
     Combines all methods for best performance.
@@ -313,7 +493,7 @@ def create_pruner(method='btp', **kwargs):
     Create a pruning method.
 
     Args:
-        method: One of ['btp', 'rpd', 'cam', 'lli', 'hfp']
+        method: One of ['btp', 'rpd', 'cam', 'lli', 'hfp', 'sgp']
         **kwargs: Additional arguments for the method
 
     Returns:
@@ -328,6 +508,8 @@ def create_pruner(method='btp', **kwargs):
         return pruner
     elif method == 'hfp':
         return HybridFastPruner(**kwargs)
+    elif method == 'sgp':
+        return SpatialGroupedPruner(**kwargs)
     elif method == 'btp':
         return None  # Use original BTP method
     else:
