@@ -23,6 +23,7 @@ PRUNING_METHODS = {
     'cam': 'Cross-Attention Mining (free, task-aware)',
     'hfp': 'Hybrid Fast Pruning (combines RPD + CAM)',
     'sgp': 'Spatial Grouped Pruning (2-4× faster, spatial-aware)',
+    'vca': 'Visual Contrast Attention (VCA-inspired, learnable)',
 }
 
 
@@ -106,6 +107,7 @@ Available Pruning Methods:
   cam  : Cross-Attention Mining (free, task-aware)
   hfp  : Hybrid Fast Pruning (combines RPD + CAM)
   sgp  : Spatial Grouped Pruning (2-4× faster, spatial-aware)
+  vca  : Visual Contrast Attention (VCA-inspired, learnable)
 
 Examples:
 ---------

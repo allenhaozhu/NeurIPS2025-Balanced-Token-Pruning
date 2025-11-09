@@ -964,6 +964,8 @@ class LlamaModel(LlamaPreTrainedModel):
                 self.pruner = create_pruner('hfp', d_model=config.hidden_size, use_learned=False)
             elif self.pruning_method == 'sgp':
                 self.pruner = create_pruner('sgp', num_groups=4, grid_size=24, grouping='spatial')
+            elif self.pruning_method == 'vca':
+                self.pruner = create_pruner('vca', n_contrast_tokens=64, d_model=config.hidden_size)
             else:
                 raise ValueError(f"Unknown pruning method: {self.pruning_method}")
         else:
@@ -1124,6 +1126,19 @@ class LlamaModel(LlamaPreTrainedModel):
 
         elif self.pruning_method == 'sgp':
             # Spatial Grouped Pruning
+            indices = self.pruner.prune(
+                hidden_states,
+                k,
+                attention_weights=prelayer_attention,
+                image_start=35,
+                image_end=611
+            )
+
+        elif self.pruning_method == 'vca':
+            # Visual Contrast Attention inspired pruning
+            if not hasattr(self.pruner, 'initialized') or not self.pruner.initialized:
+                self.pruner.to(hidden_states.device)
+
             indices = self.pruner.prune(
                 hidden_states,
                 k,

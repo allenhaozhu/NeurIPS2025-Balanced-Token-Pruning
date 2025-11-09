@@ -1,12 +1,13 @@
 # Advanced Pruning Methods Guide
 
-This repository now includes **5 pruning methods** that can be compared against the original BTP (Balanced Token Pruning):
+This repository now includes **6 pruning methods** that can be compared against the original BTP (Balanced Token Pruning):
 
 1. **BTP** - Original Balanced Token Pruning (baseline)
 2. **RPD** - Random Projection Diversity (4× faster diversity computation)
 3. **CAM** - Cross-Attention Mining (free, task-aware pruning)
 4. **HFP** - Hybrid Fast Pruning (combines RPD + CAM for best results)
 5. **SGP** - Spatial Grouped Pruning (2-4× faster, spatial-aware)
+6. **VCA** - Visual Contrast Attention inspired (500× faster, learnable)
 
 ---
 
@@ -19,6 +20,7 @@ This repository now includes **5 pruning methods** that can be compared against 
 | **CAM** | **∞ (free)** | **Better** (task-aware) | Same | No |
 | **HFP** | **4-9× faster** | **Better** (combined) | Same | No |
 | **SGP** | **2-4× faster** | **-1 to -2%** (trade-off) | Same | No |
+| **VCA** | **500× faster** | **Same or better** (learnable) | Same | Optional |
 
 ---
 

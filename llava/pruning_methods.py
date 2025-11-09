@@ -178,6 +178,171 @@ class TinyImportancePredictor(nn.Module):
         return importance
 
 
+class VisualContrastPruner:
+    """
+    Visual Contrast Attention (VCA) inspired pruning.
+
+    Borrows VCA's key insight: Use differential contrast between positive and
+    negative "viewpoints" to identify salient tokens.
+
+    Key idea:
+    1. Compress image tokens (576 → 64) via average pooling
+    2. Create positive/negative streams with learnable encodings
+    3. Compute contrast = |positive_attention - negative_attention|
+    4. High contrast = important token (keep), Low contrast = redundant (prune)
+
+    Complexity: O(nN + nC) where n=64, N=576
+    - Much faster than BTP's O(N²d)
+    - Uses learned contrast instead of hand-crafted heuristics
+
+    Advantages:
+    - Learnable (encodings adapt to data)
+    - Efficient (only n contrast tokens)
+    - Principled (based on VCA theory)
+    - Captures salient differences
+    """
+
+    def __init__(self, n_contrast_tokens=64, d_model=4096, device='cuda'):
+        """
+        Args:
+            n_contrast_tokens: Number of compressed tokens (default 64 = 8×8)
+            d_model: Model hidden dimension
+            device: Device for learnable parameters
+        """
+        self.n_contrast_tokens = n_contrast_tokens
+        self.d_model = d_model
+        self.device = device
+
+        # Learnable positive and negative position encodings
+        # These create two different "viewpoints" for contrast
+        self.pos_encoding = nn.Parameter(
+            torch.randn(1, n_contrast_tokens, d_model) * 0.02
+        )
+        self.neg_encoding = nn.Parameter(
+            torch.randn(1, n_contrast_tokens, d_model) * 0.02
+        )
+
+        self.initialized = False
+
+    def to(self, device):
+        """Move learnable parameters to device"""
+        if not self.initialized:
+            self.pos_encoding = self.pos_encoding.to(device)
+            self.neg_encoding = self.neg_encoding.to(device)
+            self.device = device
+            self.initialized = True
+        return self
+
+    def compress_tokens(self, hidden_states):
+        """
+        Stage 1: Compress image tokens via average pooling
+
+        Args:
+            hidden_states: [n_tokens, d_model] e.g., [576, 4096]
+
+        Returns:
+            compressed: [n_contrast_tokens, d_model] e.g., [64, 4096]
+        """
+        n_tokens = hidden_states.shape[0]
+        grid_size = int(math.sqrt(n_tokens))  # 24 for 576 tokens
+
+        # Target compression grid size
+        compress_size = int(math.sqrt(self.n_contrast_tokens))  # 8 for 64 tokens
+
+        # Reshape to 2D grid: [24, 24, 4096]
+        hidden_2d = hidden_states.reshape(grid_size, grid_size, -1)
+
+        # Permute to [4096, 24, 24] for pooling
+        hidden_2d = hidden_2d.permute(2, 0, 1).unsqueeze(0)  # [1, 4096, 24, 24]
+
+        # Average pool to [1, 4096, 8, 8]
+        pooled = F.adaptive_avg_pool2d(hidden_2d, (compress_size, compress_size))
+
+        # Reshape back to [64, 4096]
+        compressed = pooled.squeeze(0).flatten(1).transpose(0, 1)
+
+        return compressed
+
+    def compute_differential_contrast(self, compressed, original_tokens):
+        """
+        Stage 2: Compute differential contrast scores
+
+        Creates positive and negative streams, computes their interaction
+        with original tokens, and returns the contrast (difference).
+
+        Args:
+            compressed: [n_contrast_tokens, d_model] e.g., [64, 4096]
+            original_tokens: [n_tokens, d_model] e.g., [576, 4096]
+
+        Returns:
+            contrast_scores: [n_tokens] importance score for each token
+        """
+        # Create positive and negative streams
+        pos_stream = compressed + self.pos_encoding.squeeze(0)  # [64, 4096]
+        neg_stream = compressed + self.neg_encoding.squeeze(0)  # [64, 4096]
+
+        # Normalize for stable dot products
+        pos_stream = F.normalize(pos_stream, p=2, dim=1)
+        neg_stream = F.normalize(neg_stream, p=2, dim=1)
+        original_norm = F.normalize(original_tokens, p=2, dim=1)
+
+        # Compute similarity scores
+        # pos_scores[i, j] = similarity between contrast_token_i and original_token_j
+        pos_scores = torch.matmul(pos_stream, original_norm.T)  # [64, 576]
+        neg_scores = torch.matmul(neg_stream, original_norm.T)  # [64, 576]
+
+        # Differential contrast: tokens with high variance across views are important
+        contrast = torch.abs(pos_scores - neg_scores)  # [64, 576]
+
+        # Aggregate across contrast tokens
+        # High average contrast = this token looks different in pos vs neg views = important
+        contrast_scores = contrast.mean(dim=0)  # [576]
+
+        return contrast_scores
+
+    def prune(self, hidden_states, k, attention_weights=None, image_start=35, image_end=611):
+        """
+        Prune tokens using visual contrast.
+
+        Args:
+            hidden_states: [batch, seq_len, d_model] or [seq_len, d_model]
+            k: Number of tokens to keep
+            attention_weights: Optional (not used, for API compatibility)
+            image_start: Start index of image tokens
+            image_end: End index of image tokens
+
+        Returns:
+            indices: Selected token indices (relative to image region)
+        """
+        # Move parameters to correct device if needed
+        if not self.initialized:
+            self.to(hidden_states.device)
+
+        # Handle batch dimension
+        if len(hidden_states.shape) == 3:
+            hidden_states = hidden_states.squeeze(0)
+
+        # Extract image tokens
+        img_tokens = hidden_states[image_start:image_end]  # [576, 4096]
+
+        # Stage 1: Compress to contrast tokens
+        compressed = self.compress_tokens(img_tokens)  # [64, 4096]
+
+        # Stage 2: Compute differential contrast
+        importance = self.compute_differential_contrast(compressed, img_tokens)  # [576]
+
+        # Select top-k tokens based on contrast
+        if k < len(importance):
+            indices = torch.topk(importance, k).indices
+        else:
+            indices = torch.arange(len(importance))
+
+        # Sort for sequential access
+        indices, _ = torch.sort(indices)
+
+        return indices
+
+
 class SpatialGroupedPruner:
     """
     Spatial Grouped Pruning - divides image into spatial regions and prunes within each.
@@ -493,7 +658,7 @@ def create_pruner(method='btp', **kwargs):
     Create a pruning method.
 
     Args:
-        method: One of ['btp', 'rpd', 'cam', 'lli', 'hfp', 'sgp']
+        method: One of ['btp', 'rpd', 'cam', 'lli', 'hfp', 'sgp', 'vca']
         **kwargs: Additional arguments for the method
 
     Returns:
@@ -510,6 +675,8 @@ def create_pruner(method='btp', **kwargs):
         return HybridFastPruner(**kwargs)
     elif method == 'sgp':
         return SpatialGroupedPruner(**kwargs)
+    elif method == 'vca':
+        return VisualContrastPruner(**kwargs)
     elif method == 'btp':
         return None  # Use original BTP method
     else:
